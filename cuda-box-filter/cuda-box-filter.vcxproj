@@ -80,6 +80,7 @@
     <CudaCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ring_buffer.h" />
     <ClInclude Include="util.h" />
     <ClInclude Include="errors.h" />
     <ClInclude Include="image.h" />

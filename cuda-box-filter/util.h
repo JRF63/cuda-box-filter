@@ -5,6 +5,8 @@
 #include "cuda_runtime.h"
 #include "nppi.h"
 
+#include <memory>
+
 enum class TimingEventKind {
 	START,
 	WRITE_END,
@@ -12,39 +14,41 @@ enum class TimingEventKind {
 	READ_END,
 };
 
+struct CudaEventDestroyer {
+	void operator()(cudaEvent_t ptr) { cudaEventDestroy(ptr); }
+};
+
 class TimingEvents {
 public:
 	TimingEvents() {
-		CUDA_CHECK(cudaEventCreate(&start_));
-		CUDA_CHECK(cudaEventCreate(&writeEnd_));
-		CUDA_CHECK(cudaEventCreate(&filteringEnd_));
-		CUDA_CHECK(cudaEventCreate(&readEnd_));
-	}
+		cudaEvent_t start;
+		CUDA_CHECK(cudaEventCreate(&start));
+		start_ = std::unique_ptr<CUevent_st, CudaEventDestroyer>(start);
 
-	~TimingEvents() {
-		CUDA_CHECK(cudaEventDestroy(start_));
-		CUDA_CHECK(cudaEventDestroy(writeEnd_));
-		CUDA_CHECK(cudaEventDestroy(filteringEnd_));
-		CUDA_CHECK(cudaEventDestroy(readEnd_));
-	}
+		cudaEvent_t writeEnd;
+		CUDA_CHECK(cudaEventCreate(&writeEnd));
+		writeEnd_ = std::unique_ptr<CUevent_st, CudaEventDestroyer>(writeEnd);
 
-	// Move only; no copying
-	TimingEvents(const TimingEvents&) = delete;
-	TimingEvents& operator= (const TimingEvents&) = delete;
-	TimingEvents(TimingEvents&& other) = default;
-	TimingEvents& operator=(TimingEvents&&) = default;
+		cudaEvent_t filteringEnd;
+		CUDA_CHECK(cudaEventCreate(&filteringEnd));
+		filteringEnd_ = std::unique_ptr<CUevent_st, CudaEventDestroyer>(filteringEnd);
+
+		cudaEvent_t readEnd;
+		CUDA_CHECK(cudaEventCreate(&readEnd));
+		readEnd_ = std::unique_ptr<CUevent_st, CudaEventDestroyer>(readEnd);
+	}
 
 	// Records the event to the stream asynchronously.
 	cudaError_t record(TimingEventKind kind, cudaStream_t stream) {
 		switch (kind) {
 		case TimingEventKind::START:
-			return cudaEventRecord(start_, stream);
+			return cudaEventRecord(start_.get(), stream);
 		case TimingEventKind::WRITE_END:
-			return cudaEventRecord(writeEnd_, stream);
+			return cudaEventRecord(writeEnd_.get(), stream);
 		case TimingEventKind::FILTERING_END:
-			return cudaEventRecord(filteringEnd_, stream);
+			return cudaEventRecord(filteringEnd_.get(), stream);
 		case TimingEventKind::READ_END:
-			return cudaEventRecord(readEnd_, stream);
+			return cudaEventRecord(readEnd_.get(), stream);
 		}
 		// Unreachable
 		return cudaErrorUnknown;
@@ -64,22 +68,22 @@ public:
 			return error;
 		}
 
-		error = cudaEventElapsedTime(writeDuration, start_, writeEnd_);
+		error = cudaEventElapsedTime(writeDuration, start_.get(), writeEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(filteringDuration, writeEnd_, filteringEnd_);
+		error = cudaEventElapsedTime(filteringDuration, writeEnd_.get(), filteringEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(readDuration, filteringEnd_, readEnd_);
+		error = cudaEventElapsedTime(readDuration, filteringEnd_.get(), readEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(latency, start_, readEnd_);
+		error = cudaEventElapsedTime(latency, start_.get(), readEnd_.get());
 		if (error) {
 			return error;
 		}
@@ -90,21 +94,28 @@ public:
 private:
 	// Assuming the events happen sequentially, we only need to sync with the last one.
 	cudaError_t synchronizeReadEnd() {
-		return cudaEventSynchronize(readEnd_);
+		return cudaEventSynchronize(readEnd_.get());
 	}
 
-	cudaEvent_t start_;
-	cudaEvent_t writeEnd_;
-	cudaEvent_t filteringEnd_;
-	cudaEvent_t readEnd_;
+	std::unique_ptr<CUevent_st, CudaEventDestroyer> start_;
+	std::unique_ptr<CUevent_st, CudaEventDestroyer> writeEnd_;
+	std::unique_ptr<CUevent_st, CudaEventDestroyer> filteringEnd_;
+	std::unique_ptr<CUevent_st, CudaEventDestroyer> readEnd_;
+};
+
+struct CudaStreamDestroyer {
+	void operator()(cudaStream_t ptr) { cudaStreamDestroy(ptr); }
 };
 
 // Wrapper type that bundles `NppStreamContext` and `cudaStream_t` together
 class NppStream {
 public:
 	NppStream() {
-		CUDA_CHECK(cudaStreamCreate(&stream_));
-		ctx_.hStream = stream_;
+		cudaStream_t stream;
+		CUDA_CHECK(cudaStreamCreate(&stream));
+		stream_ = std::unique_ptr<CUstream_st, CudaStreamDestroyer>(stream);
+
+		ctx_.hStream = stream_.get();
 		CUDA_CHECK(cudaGetDevice(&ctx_.nCudaDeviceId));
 		CUDA_CHECK(
 			cudaDeviceGetAttribute(
@@ -130,25 +141,14 @@ public:
 		ctx_.nSharedMemPerBlock = deviceProperties.sharedMemPerBlock;
 	}
 
-	~NppStream() {
-		CUDA_CHECK(cudaStreamDestroy(stream_));
-		// NppStreamContext does not need to be freed
-	}
-
-	// Move only; no copying
-	NppStream(const NppStream&) = delete;
-	NppStream& operator= (const NppStream&) = delete;
-	NppStream(NppStream&& other) = default;
-	NppStream& operator=(NppStream&&) = default;
-
 	NppStreamContext context() {
 		return ctx_;
 	}
 
 	cudaStream_t stream() {
-		return stream_;
+		return stream_.get();
 	}
 private:
 	NppStreamContext ctx_;
-	cudaStream_t stream_;
+	std::unique_ptr<CUstream_st, CudaStreamDestroyer> stream_;
 };

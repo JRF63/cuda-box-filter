@@ -6,25 +6,19 @@
 
 class ImageCpu;
 
+struct NppiDeleter {
+	void operator()(Npp8u* ptr) { nppiFree(ptr); }
+};
+
 class ImageGpu
 {
 public:
 	ImageGpu(int width, int height): width_(width), height_(height) {
-		data_ = nppiMalloc_8u_C3(width, height, &step_);
+		data_ = std::unique_ptr<Npp8u, NppiDeleter>(nppiMalloc_8u_C3(width, height, &step_));
 	}
-
-	~ImageGpu() {
-		nppiFree(data_);
-	}
-
-	// Move only; no copying
-	ImageGpu(const ImageGpu&) = delete;
-	ImageGpu& operator= (const ImageGpu&) = delete;
-	ImageGpu(ImageGpu&& other) = default;
-	ImageGpu& operator=(ImageGpu&&) = default;
 
 	Npp8u* data() const {
-		return data_;
+		return data_.get();
 	}
 
 	int width() const {
@@ -64,7 +58,7 @@ public:
 	cudaError_t copyFromCpuAsync(const ImageCpu& other, cudaStream_t stream);
 
 private:
-	Npp8u* data_;
+	std::unique_ptr<Npp8u, NppiDeleter> data_;
 	int width_;
 	int height_;
 	int step_;
@@ -77,6 +71,10 @@ public:
 		auto size = static_cast<long long>(width) * height * 3;
 		data_ = std::make_unique<Npp8u[]>(size);
 		step_ = width * sizeof(Npp8u) * 3;
+	}
+
+	ImageCpu() : width_(0), height_(0), step_(0) {
+		data_ = nullptr;
 	}
 
 	Npp8u* data() const {
