@@ -3,6 +3,7 @@
 #include "nppi.h"
 
 #include <memory>
+#include <cstdlib>
 
 class ImageCpu;
 
@@ -38,23 +39,8 @@ public:
 	}
 
 	// Applies the box filter and writes the result to another `ImageGpu`.
-	NppStatus filterBox(const ImageGpu& output, NppiSize maskSize, NppStreamContext nppStreamCtx) {
-		return nppiFilterBoxBorder_8u_C3R_Ctx(
-			data(),
-			step(),
-			{ width(), height() },
-			{ 0, 0 },
-			output.data(),
-			output.step(),
-			{ width(), height() },
-			maskSize,
-			{ maskSize.width / 2, maskSize.height / 2 },
-			NPP_BORDER_REPLICATE,
-			nppStreamCtx
-		);
-	}
+	NppStatus filterBox(const ImageGpu& output, NppiSize maskSize, NppStreamContext nppStreamCtx);
 
-	// Forward declare because of usage of `ImageCpu`
 	cudaError_t copyFromCpuAsync(const ImageCpu& other, cudaStream_t stream);
 
 private:
@@ -71,6 +57,15 @@ public:
 		auto size = static_cast<long long>(width) * height * 3;
 		data_ = std::make_unique<Npp8u[]>(size);
 		step_ = width * sizeof(Npp8u) * 3;
+	}
+
+	ImageCpu(Npp8u* data, int width, int height, int step)
+		: width_(width), height_(height), step_(step)
+	{
+		auto size = static_cast<long long>(height) * step;
+		data_ = std::make_unique<Npp8u[]>(size);
+		// CUDA code samples reverses the order of the rows but that's not need for box filtering
+		memcpy(data_.get(), data, size);
 	}
 
 	ImageCpu() : width_(0), height_(0), step_(0) {
@@ -97,18 +92,7 @@ public:
 		return width() * sizeof(Npp8u) * 3;
 	}
 
-	cudaError_t copyFromGpuAsync(const ImageGpu& other, cudaStream_t stream) {
-		return cudaMemcpy2DAsync(
-			data(),
-			step(),
-			other.data(),
-			other.step(),
-			other.widthBytes(),
-			other.height(),
-			cudaMemcpyDeviceToHost,
-			stream
-		);
-	}
+	cudaError_t copyFromGpuAsync(const ImageGpu& other, cudaStream_t stream);
 
 private:
 	// Usage of `std::unique_ptr` implicitly disables the copy constructor
@@ -117,16 +101,3 @@ private:
 	int height_;
 	int step_;
 };
-
-cudaError_t ImageGpu::copyFromCpuAsync(const ImageCpu& other, cudaStream_t stream) {
-	return cudaMemcpy2DAsync(
-		data(),
-		step(),
-		other.data(),
-		other.step(),
-		other.widthBytes(),
-		other.height(),
-		cudaMemcpyHostToDevice,
-		stream
-	);
-}

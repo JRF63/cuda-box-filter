@@ -8,10 +8,10 @@
 #include <memory>
 
 enum class TimingEventKind {
-	START,
-	WRITE_END,
-	FILTERING_END,
-	READ_END,
+	Start,
+	WriteEnd,
+	FilteringEnd,
+	ReadEnd,
 };
 
 struct CudaEventDestroyer {
@@ -41,13 +41,13 @@ public:
 	// Records the event to the stream asynchronously.
 	cudaError_t record(TimingEventKind kind, cudaStream_t stream) {
 		switch (kind) {
-		case TimingEventKind::START:
+		case TimingEventKind::Start:
 			return cudaEventRecord(start_.get(), stream);
-		case TimingEventKind::WRITE_END:
+		case TimingEventKind::WriteEnd:
 			return cudaEventRecord(writeEnd_.get(), stream);
-		case TimingEventKind::FILTERING_END:
+		case TimingEventKind::FilteringEnd:
 			return cudaEventRecord(filteringEnd_.get(), stream);
-		case TimingEventKind::READ_END:
+		case TimingEventKind::ReadEnd:
 			return cudaEventRecord(readEnd_.get(), stream);
 		}
 		// Unreachable

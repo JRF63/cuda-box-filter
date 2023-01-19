@@ -3,6 +3,7 @@
 #include "image.h"
 #include "util.h"
 #include "ring_buffer.h"
+#include "image_io.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -48,19 +49,19 @@ void doFilter(ImageCpu& image, NppiSize maskSize, NppStream& nppStream, TimingEv
 	ImageGpu input(image.width(), image.height());
 	ImageGpu output(image.width(), image.height());
 
-	CUDA_CHECK(events.record(TimingEventKind::START, nppStream.stream()));
+	CUDA_CHECK(events.record(TimingEventKind::Start, nppStream.stream()));
 
 	CUDA_CHECK(input.copyFromCpuAsync(image, nppStream.stream()));
 
-	CUDA_CHECK(events.record(TimingEventKind::WRITE_END, nppStream.stream()));
+	CUDA_CHECK(events.record(TimingEventKind::WriteEnd, nppStream.stream()));
 
 	NPP_CHECK(input.filterBox(output, maskSize, nppStream.context()));
 
-	CUDA_CHECK(events.record(TimingEventKind::FILTERING_END, nppStream.stream()));
+	CUDA_CHECK(events.record(TimingEventKind::FilteringEnd, nppStream.stream()));
 
 	CUDA_CHECK(image.copyFromGpuAsync(output, nppStream.stream()));
 
-	CUDA_CHECK(events.record(TimingEventKind::READ_END, nppStream.stream()));
+	CUDA_CHECK(events.record(TimingEventKind::ReadEnd, nppStream.stream()));
 }
 
 struct Batch {
@@ -77,57 +78,79 @@ int main() {
 
 	int N = 4;
 	int NUM_BATCHES = 10;
-	NppiSize maskSize = { 5, 5 };
+	NppiSize maskSize = { 16, 16 };
 
-	std::shared_ptr<std::atomic_bool> stop = std::make_shared<std::atomic_bool>(false);
-	std::shared_ptr<AtomicRingBuffer<ImageCpu>> images = std::make_shared<AtomicRingBuffer<ImageCpu>>(N);
+	//std::atomic_bool stop(false);
+	//AtomicRingBuffer<ImageCpu> images(N);
 
-	// Preload images
-	for (int i = 0; i < (1 << N); i++) {
-		images->push(createDummyImage());
+	//// Preload images
+	//for (int i = 0; i < (1 << N); i++) {
+	//	images.push(createDummyImage());
+	//}
+
+	//std::thread timer([&]() {
+	//	using namespace std::chrono_literals;
+	//	std::this_thread::sleep_for(10s);
+	//	stop.store(true, std::memory_order_release);
+	//});
+
+	//std::thread imageProducer([&]() {
+	//	while (!stop.load(std::memory_order_acquire)) {
+	//		images.push(createDummyImage());
+	//	}
+	//});
+
+	//std::vector<Batch> batches;
+
+	//for (int i = 0; i < NUM_BATCHES; i++) {
+	//	printf("%d\n", i);
+	//	batches.push_back(Batch{ NppStream(), TimingEvents() });
+	//}
+
+	//int i = 0;
+	//while (!stop.load(std::memory_order_acquire)) {
+	//	if (i == NUM_BATCHES) {
+	//		i = 0;
+	//	}
+
+	//	float writeDuration;
+	//	float filteringDuration;
+	//	float readDuration;
+	//	float latency;
+
+	//	ImageCpu image = images.pop();
+	//	doFilter(image, maskSize, batches[i].nppStream, batches[i].events);
+
+	//	CUDA_CHECK(batches[i].events.getTimingData(&writeDuration, &filteringDuration, &readDuration, &latency));
+	//	printf("%5.5f %5.5f %5.5f %5.5f\n", writeDuration, filteringDuration, readDuration, latency);
+
+	//	i++;
+	//}
+
+	//timer.join();
+	//imageProducer.join();
+
+	ImageCpu image;
+	if (loadImage("images/P0006.png", image) != IoError::Success) {
+		return 1;
 	}
 
-	std::thread timer([=]() {
-		using namespace std::chrono_literals;
-		std::this_thread::sleep_for(10s);
-		stop->store(true, std::memory_order_release);
-	});
+	NppStream nppStream;
+	TimingEvents events;
 
-	std::thread imageProducer([=]() {
-		while (!stop->load(std::memory_order_acquire)) {
-			images->push(createDummyImage());
-		}
-	});
+	doFilter(image, maskSize, nppStream, events);
 
-	std::vector<Batch> batches;
+	float writeDuration;
+	float filteringDuration;
+	float readDuration;
+	float latency;
 
-	for (int i = 0; i < NUM_BATCHES; i++) {
-		printf("%d\n", i);
-		batches.push_back(Batch{ NppStream(), TimingEvents() });
+	CUDA_CHECK(events.getTimingData(&writeDuration, &filteringDuration, &readDuration, &latency));
+	printf("%5.5f %5.5f %5.5f %5.5f\n", writeDuration, filteringDuration, readDuration, latency);
+
+	if (saveImage("outputs/P0006.png", image) != IoError::Success) {
+		return 1;
 	}
-
-	int i = 0;
-	while (!stop->load(std::memory_order_acquire)) {
-		if (i == NUM_BATCHES) {
-			i = 0;
-		}
-
-		float writeDuration;
-		float filteringDuration;
-		float readDuration;
-		float latency;
-
-		ImageCpu image = images->pop();
-		doFilter(image, maskSize, batches[i].nppStream, batches[i].events);
-
-		CUDA_CHECK(batches[i].events.getTimingData(&writeDuration, &filteringDuration, &readDuration, &latency));
-		printf("%5.5f %5.5f %5.5f %5.5f\n", writeDuration, filteringDuration, readDuration, latency);
-
-		i++;
-	}
-
-	timer.join();
-	imageProducer.join();
 
 	return 0;
 }
