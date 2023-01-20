@@ -2,7 +2,7 @@
 
 #include "image.h"
 
-#include <string>
+#include <filesystem>
 
 enum class IoError {
 	Success,
@@ -13,6 +13,6 @@ enum class IoError {
 	WritingFailed,
 };
 
-IoError loadImage(const std::string& fileName, ImageCpu& image);
+IoError loadImage(const std::filesystem::path& fileName, ImageCpu& image);
 
-IoError saveImage(const std::string& fileName, const ImageCpu& image);
+IoError saveImage(const std::filesystem::path& fileName, const ImageCpu& image);

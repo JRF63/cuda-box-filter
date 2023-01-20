@@ -4,11 +4,16 @@
 // https://freeimage.sourceforge.io/freeimage-license.txt
 #include "FreeImage.h"
 
-IoError loadImage(const std::string& fileName, ImageCpu& image) {
+#include <string>
 
-	FREE_IMAGE_FORMAT eFormat = FreeImage_GetFileType(fileName.c_str());
+IoError loadImage(const std::filesystem::path& fileName, ImageCpu& image) {
+	// Create an L-value std::string to ensure that the pointer from c_str does not get invalidated
+	std::string tmp = fileName.string();
+	const char* fileNameCstr = tmp.c_str();
+
+	FREE_IMAGE_FORMAT eFormat = FreeImage_GetFileType(fileNameCstr);
 	if (eFormat == FIF_UNKNOWN) {
-		eFormat = FreeImage_GetFIFFromFilename(fileName.c_str());
+		eFormat = FreeImage_GetFIFFromFilename(fileNameCstr);
 		if (eFormat == FIF_UNKNOWN) {
 			return IoError::UnknownFileFormat;
 		}
@@ -17,7 +22,7 @@ IoError loadImage(const std::string& fileName, ImageCpu& image) {
 	FIBITMAP* bitmap = nullptr;
 
 	if (FreeImage_FIFSupportsReading(eFormat)) {
-		bitmap = FreeImage_Load(eFormat, fileName.c_str());
+		bitmap = FreeImage_Load(eFormat, fileNameCstr);
 	}
 
 	if (bitmap == nullptr) {
@@ -34,6 +39,7 @@ IoError loadImage(const std::string& fileName, ImageCpu& image) {
 	int height = FreeImage_GetHeight(bitmap);
 	int pitch = FreeImage_GetPitch(bitmap);
 	ImageCpu newImage(data, width, height, pitch);
+	newImage.setFilename(fileName.filename().string());
 
 	std::swap(image, newImage);
 
@@ -42,7 +48,10 @@ IoError loadImage(const std::string& fileName, ImageCpu& image) {
 	return IoError::Success;
 }
 
-IoError saveImage(const std::string& fileName, const ImageCpu& image) {
+IoError saveImage(const std::filesystem::path& fileName, const ImageCpu& image) {
+	std::string tmp = fileName.string();
+	const char* fileNameCstr = tmp.c_str();
+
 	FIBITMAP* bitmap = FreeImage_Allocate(image.width(), image.height(), 24);
 	if (bitmap == nullptr) {
 		return IoError::AllocationError;
@@ -50,7 +59,7 @@ IoError saveImage(const std::string& fileName, const ImageCpu& image) {
 
 	memcpy(FreeImage_GetBits(bitmap), image.data(), image.step() * image.height());
 
-	auto result = FreeImage_Save(FIF_PNG, bitmap, fileName.c_str(), 0);
+	auto result = FreeImage_Save(FIF_PNG, bitmap, fileNameCstr, 0);
 
 	FreeImage_Unload(bitmap);
 

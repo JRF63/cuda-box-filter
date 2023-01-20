@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <cstdlib>
+#include <string>
 
 class ImageCpu;
 
@@ -72,6 +73,10 @@ public:
 		data_ = nullptr;
 	}
 
+	void setFilename(std::string&& fileName) {
+		fileName_ = std::move(fileName);
+	}
+
 	Npp8u* data() const {
 		return data_.get();
 	}
@@ -92,11 +97,16 @@ public:
 		return width() * sizeof(Npp8u) * 3;
 	}
 
+	const std::string& fileName() const {
+		return fileName_;
+	}
+
 	cudaError_t copyFromGpuAsync(const ImageGpu& other, cudaStream_t stream);
 
 private:
 	// Usage of `std::unique_ptr` implicitly disables the copy constructor
 	std::unique_ptr<Npp8u[]> data_;
+	std::string fileName_;
 	int width_;
 	int height_;
 	int step_;

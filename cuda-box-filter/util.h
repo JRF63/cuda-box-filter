@@ -14,6 +14,13 @@ enum class TimingEventKind {
 	ReadEnd,
 };
 
+struct TimingData {
+	float writeDuration;
+	float filteringDuration;
+	float readDuration;
+	float latency;
+};
+
 struct CudaEventDestroyer {
 	void operator()(cudaEvent_t ptr) { cudaEventDestroy(ptr); }
 };
@@ -55,12 +62,7 @@ public:
 	}
 
 	// Get the raw timing data. This call implicitly waits for the last event to complete.
-	cudaError_t getTimingData(
-		float* writeDuration,
-		float* filteringDuration,
-		float* readDuration,
-		float* latency
-	) {
+	cudaError_t getTimingData(TimingData& timingData) {
 		cudaError_t error;
 
 		error = synchronizeReadEnd();
@@ -68,22 +70,22 @@ public:
 			return error;
 		}
 
-		error = cudaEventElapsedTime(writeDuration, start_.get(), writeEnd_.get());
+		error = cudaEventElapsedTime(&timingData.writeDuration, start_.get(), writeEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(filteringDuration, writeEnd_.get(), filteringEnd_.get());
+		error = cudaEventElapsedTime(&timingData.filteringDuration, writeEnd_.get(), filteringEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(readDuration, filteringEnd_.get(), readEnd_.get());
+		error = cudaEventElapsedTime(&timingData.readDuration, filteringEnd_.get(), readEnd_.get());
 		if (error) {
 			return error;
 		}
 
-		error = cudaEventElapsedTime(latency, start_.get(), readEnd_.get());
+		error = cudaEventElapsedTime(&timingData.latency, start_.get(), readEnd_.get());
 		if (error) {
 			return error;
 		}
