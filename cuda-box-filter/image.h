@@ -51,12 +51,18 @@ private:
 	int step_;
 };
 
+struct PinnedMemoryDestroyer {
+	void operator()(void* ptr) { cudaFreeHost(ptr); }
+};
+
 class ImageCpu {
 public:
 	ImageCpu(int width, int height) : width_(width), height_(height) {
 		// Cast to `long long` first to suppress compiler warnings
 		auto size = static_cast<long long>(width) * height * 3;
-		data_ = std::make_unique<Npp8u[]>(size);
+		void* ptr = nullptr;
+		cudaMallocHost(&ptr, size);
+		data_ = std::unique_ptr<Npp8u, PinnedMemoryDestroyer>(static_cast<Npp8u*>(ptr));
 		step_ = width * sizeof(Npp8u) * 3;
 	}
 
@@ -64,7 +70,9 @@ public:
 		: width_(width), height_(height), step_(step)
 	{
 		auto size = static_cast<long long>(height) * step;
-		data_ = std::make_unique<Npp8u[]>(size);
+		void* ptr = nullptr;
+		cudaMallocHost(&ptr, size);
+		data_ = std::unique_ptr<Npp8u, PinnedMemoryDestroyer>(static_cast<Npp8u*>(ptr));
 		// CUDA code samples reverses the order of the rows but that's not need for box filtering
 		memcpy(data_.get(), data, size);
 	}
@@ -105,7 +113,7 @@ public:
 
 private:
 	// Usage of `std::unique_ptr` implicitly disables the copy constructor
-	std::unique_ptr<Npp8u[]> data_;
+	std::unique_ptr<Npp8u, PinnedMemoryDestroyer> data_;
 	std::string fileName_;
 	int width_;
 	int height_;
