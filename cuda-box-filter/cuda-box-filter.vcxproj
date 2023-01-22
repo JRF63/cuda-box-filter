@@ -88,18 +88,20 @@
     <CudaCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="image_io.h" />
+    <ClInclude Include="image_buffer.h" />
+    <ClInclude Include="image_base.h" />
     <ClInclude Include="resource.h" />
-    <ClInclude Include="ring_buffer.h" />
-    <ClInclude Include="util.h" />
+    <ClInclude Include="cuda_helper.h" />
     <ClInclude Include="errors.h" />
-    <ClInclude Include="image.h" />
+    <ClInclude Include="image_cpu.h" />
     <ClInclude Include="info.h" />
+    <ClInclude Include="sync.h" />
+    <ClInclude Include="util.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="image_buffer.cpp" />
     <ClCompile Include="errors.cpp" />
-    <ClCompile Include="image.cpp" />
-    <ClCompile Include="image_io.cpp" />
+    <ClCompile Include="image_cpu.cpp" />
     <ClCompile Include="info.cpp" />
   </ItemGroup>
   <ItemGroup>

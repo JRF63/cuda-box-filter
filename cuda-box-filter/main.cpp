@@ -1,89 +1,24 @@
 ﻿#include "info.h"
 #include "errors.h"
-#include "image.h"
+#include "image_cpu.h"
+#include "image_buffer.h"
+#include "cuda_helper.h"
 #include "util.h"
-#include "ring_buffer.h"
-#include "image_io.h"
-#include "signal.h"
+#include "sync.h"
 
-#include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <deque>
 #include <filesystem> // Need C++17 for this
 #include <fstream>
+#include <mutex>
 #include <iostream>
 #include <vector>
 
-void doFilter(ImageCpu& image, NppiSize maskSize, NppStream& nppStream, TimingEvents& events) {
-	// These can be pre-allocated outside this call if the images have the same resolution
-	ImageGpu input(image.width(), image.height());
-	ImageGpu output(image.width(), image.height());
-
-	CUDA_CHECK(events.record(TimingEventKind::Start, nppStream.stream()));
-
-	// Copy from CPU to GPU
-	CUDA_CHECK(input.copyFromCpuAsync(image, nppStream.stream()));
-
-	CUDA_CHECK(events.record(TimingEventKind::WriteEnd, nppStream.stream()));
-
-	// Do the filter
-	NPP_CHECK(input.filterBox(output, maskSize, nppStream.context()));
-
-	CUDA_CHECK(events.record(TimingEventKind::FilteringEnd, nppStream.stream()));
-
-	// Copy from GPU to CPU and write back to the original image
-	CUDA_CHECK(image.copyFromGpuAsync(output, nppStream.stream()));
-
-	CUDA_CHECK(events.record(TimingEventKind::ReadEnd, nppStream.stream()));
-}
-
-struct Batch {
-	NppStream nppStream;
-	TimingEvents events;
-	ImageCpu output;
-	std::atomic_bool hasData;
-
-	Batch(): nppStream(NppStream()), events(TimingEvents()), output(ImageCpu()), hasData(false) {}
-
-	// Move only
-	Batch(const Batch&) = delete;
-	Batch& operator=(const Batch&) = delete;
-	Batch(Batch&&) noexcept {}
-	Batch& operator=(Batch&&) noexcept {}
-
-	void setDataAvailable(bool val) {
-		hasData.store(val, std::memory_order_release);
-	}
-
-	bool isDataAvailable() {
-		return hasData.load(std::memory_order_acquire);
-	}
-
-	void setOutput(ImageCpu&& image) {
-		output = std::move(image);
-	}
-
-	ImageCpu getOutput() {
-		ImageCpu dummy;
-		std::swap(dummy, output);
-		return dummy;
-	}
-};
-
-// Computes the logarithm base-2 of a number
-int log2(int n) {
-	int ans = 0;
-	while (n >>= 1) {
-		ans++;
-	}
-	return ans;
-}
-
 int main() {
-	if (!printNPPinfo()) {
-		return 1;
-	}
+	// Hardcoded to 10 seconds, trivial to modify.
+	auto processingDuration = std::chrono::milliseconds(10000);
 
 	// Directory that contains the images to be processed
 	const std::string& imagesDir = "images";
@@ -91,159 +26,165 @@ int main() {
 	// Directory where the outputs will be written
 	const std::string& outputDir = "outputs";
 
-	// Hardcoded to 10 seconds, trivial to modify.
-	auto processingDuration = std::chrono::milliseconds(10000);
+	// Max number of images that will be saved
+	constexpr size_t NUM_IMAGES_TO_OUTPUT = 10;
 
-	// Upper bound on the amount of images loaded to main RAM.
-	// Hardcoded. This is ideally derived from the amount of system RAM.
-	int numImagesBuffered = 64;
+	// Dataset properties. The max size of the image is the limiting factor for concurrency.
+	constexpr size_t IMAGE_MAX_WIDTH_RGB = 10240;
+	constexpr size_t IMAGE_MAX_HEIGHT_RGB = 7665;
+	constexpr size_t IMAGE_CUDA_MAX_SIZE = cudaStepSize(IMAGE_MAX_WIDTH_RGB, 3) * IMAGE_MAX_HEIGHT_RGB;
+	constexpr size_t IMAGE_CPU_MAX_SIZE = freeImageStepSize(IMAGE_MAX_WIDTH_RGB, 3) * IMAGE_MAX_HEIGHT_RGB;
 
-	// Max amount of images that is submitted to the GPU.
-	// Also hardcoded. It's best to compute this based on VRAM since the amount of CUDA stream is not
-	// usually the limit.
-	int batchSize = 64;
+	size_t freeMem;
+	size_t totalMem;
+	CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
 
-	// Size of the box filter in pixels x pixels
-	NppiSize maskSize = { 8, 8 };
+	// There are 2 GPU buffers of the same size, one for the input and one for the output
+	size_t batchSize = freeMem / (2 * IMAGE_CUDA_MAX_SIZE);
 
-	// This is needed because the queue needs to be a power of two
-	int log2NumImages = log2(numImagesBuffered);
+	Signal stopSignal;
+	Barrier barrier(batchSize);
 
-	// Single producer, single consumer queue of images
-	AtomicRingBuffer<ImageCpu> images(log2NumImages);
+	std::mutex fileNamesMutex;
+	std::deque<std::filesystem::path> fileNames;
+	std::mutex timingsMutex;
+	std::vector<TimingData> timings;
+	std::mutex outputImagesMutex;
+	std::deque<ImageCpu> outputImages;
+	std::vector<std::thread> threads;
 
-	Signal stop;
-	Signal wait;
-
-	// Thread that loads the images to CPU memory
-	std::thread imageProducer([&]() {
-		int i = 0;
-		int limit = (1 << log2NumImages); // Pause other threads before this num of images is loaded
-
-		printf("Loading images to RAM");
-		for (;;) {
-			for (const auto& entry : std::filesystem::directory_iterator{ "images" }) {
-				if (stop.shouldStop()) {
-					// Exit out of both loops
-					return;
-				}
-
-				printf(".");
-				if (i == limit) {
-					// Signal main thread to stop waiting
-					wait.signalStop();
-					printf("\nProcessing images");
-				}
-
-				ImageCpu image;
-				auto result = loadImage(entry, image);
-
-				switch (result) {
-				case IoError::Success:
-					break;
-				case IoError::UnknownFileFormat:
-					// .gitignore is in the images folder
-					continue;
-				case IoError::LoadingFailed:
-				case IoError::UnhandledFormat:
-				case IoError::AllocationError:
-				case IoError::WritingFailed:
-					fprintf(stderr, "I/O error while loading image");
-					exit(1);
-				}
-
-				images.push(std::move(image));
-				i++;
-			}
-		}
-	});
-
-	// Busy loop to wait for sufficient images to be pre-loaded
-	while (!wait.shouldStop()) {}
+	for (auto entry : std::filesystem::directory_iterator{ imagesDir }) {
+		fileNames.push_back(entry);
+	}
 
 	// Thread that signals the processing to stop
 	std::thread timer([&]() {
 		std::this_thread::sleep_for(processingDuration);
-		stop.signalStop();
-	});
+		stopSignal.signalStop();
+		});
 
-	std::vector<Batch> batches;
-	for (int i = 0; i < batchSize; i++) {
-		batches.emplace_back();
-	}
+	for (size_t i = 0; i < batchSize; i++) {
+		std::thread t([&]() {
+			StagingBuffer stagingBuffer(IMAGE_CPU_MAX_SIZE);
+			GpuBuffer gpuInput(IMAGE_CUDA_MAX_SIZE);
+			GpuBuffer gpuOutput(IMAGE_CUDA_MAX_SIZE);
 
-	// Thread that processes the filtered images
-	std::thread outputHandler([&]() {
-		std::vector<TimingData> timings;
-		std::deque<ImageCpu> processedImages;
+			NppStream nppStream;
+			TimingEvents events;
+			TimingData timingData;
+			std::string currentFilename;
 
-		int i = 0;
-		while (!stop.shouldStop()) {
-			if (batches[i].isDataAvailable()) {
-				TimingData timingData;
-				// getTimingData blocks this thread until the output is read back to system RAM
-				CUDA_CHECK(batches[i].events.getTimingData(timingData));
+			std::vector<TimingData> streamTimings;
 
-				timings.push_back(timingData);
+			barrier.wait();
+
+			while (!stopSignal.shouldStop()) {
+				if (fileNamesMutex.try_lock()) {
+					if (fileNames.empty()) {
+						fileNamesMutex.unlock();
+						break;
+					}
+					auto entry = fileNames.front();
+					fileNames.pop_front();
+					fileNamesMutex.unlock();
+
+					try {
+						ImageCpu image(entry);
+
+						int blurAmount = ceilDiv(std::min(image.width(), image.height()), 200);
+						NppiSize maskSize{ blurAmount, blurAmount };
+
+						CUDA_CHECK(stagingBuffer.copyFromCpu(image, nppStream.stream()));
+						CUDA_CHECK(events.record(TimingEventKind::Start, nppStream.stream()));
+						CUDA_CHECK(gpuInput.copyFromStagingBufferAsync(stagingBuffer, nppStream.stream()));
+						CUDA_CHECK(events.record(TimingEventKind::WriteEnd, nppStream.stream()));
+						NPP_CHECK(gpuInput.filterBox(gpuOutput, maskSize, nppStream.context()));
+						CUDA_CHECK(events.record(TimingEventKind::FilteringEnd, nppStream.stream()));
+						CUDA_CHECK(stagingBuffer.copyBackFromGpuAsync(gpuOutput, nppStream.stream()));
+						CUDA_CHECK(events.record(TimingEventKind::ReadEnd, nppStream.stream()));
+
+						currentFilename = image.fileName();
+
+						CUDA_CHECK(events.getTimingData(timingData));
+						streamTimings.push_back(timingData);
+
+						//CUDA_CHECK(image.copyBackFromStagingBuffer(stagingBuffer, nppStream.stream()));
+						//nppStream.synchronize();
+						//image.saveToDirectory("outputs");
+					}
+					catch (IoError err) {
+						switch (err) {
+						case IoError::UnknownFileFormat:
+						case IoError::LoadingFailed:
+						case IoError::UnhandledFormat:
+						case IoError::AllocationError:
+						case IoError::WritingFailed:
+							// TODO: Logging
+							continue;
+						}
+					}
+				}
+			}
+
+			// Combine the timing data
+			timingsMutex.lock();
+			for (auto timing : streamTimings) {
+				timings.push_back(timing);
+			}
+			timingsMutex.unlock();
+
+			// Save the last images processed
+			try {
+				if (currentFilename.empty()) {
+					// No images were processed
+					return;
+				}
+				ImageCpu image(currentFilename, stagingBuffer.width(), stagingBuffer.height(), stagingBuffer.bytesPerPixel());
+				CUDA_CHECK(image.copyBackFromStagingBuffer(stagingBuffer, nppStream.stream()));
+				nppStream.synchronize();
 				
-				ImageCpu output = batches[i].getOutput();
-				batches[i].setDataAvailable(false);
-
-				// Cache the last 10 images
-				processedImages.push_back(std::move(output));
-				if (processedImages.size() > 10) {
-					processedImages.pop_front();
+				outputImagesMutex.lock();
+				outputImages.push_back(std::move(image));
+				if (outputImages.size() > NUM_IMAGES_TO_OUTPUT) {
+					outputImages.pop_front();
 				}
-
-				i++;
-				if (i == batchSize) {
-					i = 0;
+				outputImagesMutex.unlock();
+			}
+			catch (IoError err) {
+				switch (err) {
+				case IoError::UnknownFileFormat:
+				case IoError::LoadingFailed:
+				case IoError::UnhandledFormat:
+				case IoError::AllocationError:
+				case IoError::WritingFailed:
+					// TODO: Logging
+					break;
 				}
 			}
-		}
-		printf("\n");
-		printf("Processed %lld images", timings.size());
+			});
 
-		// Save the last 10 images
-		for (const auto& image : processedImages) {
-			if (!image.fileName().empty()) {
-				const auto fileName = outputDir + "/" + image.fileName();
-				//saveImage(fileName, image);
-			}
-		}
-
-		// Write timing data
-		std::ofstream out(outputDir + "/timings.csv");
-		out << "write_time,processing_time,read_time,latency" << std::endl;
-		for (const auto& timing : timings) {
-			out << timing.writeDuration << ",";
-			out << timing.filteringDuration << ",";
-			out << timing.readDuration << ",";
-			out << timing.latency << ",";
-			out << std::endl;
-		}
-	});
-
-	// GPU processing loop
-	int i = 0;
-	while (!stop.shouldStop()) {
-		if (!batches[i].isDataAvailable()) {
-			ImageCpu image = images.pop();
-			doFilter(image, maskSize, batches[i].nppStream, batches[i].events);
-
-			batches[i].setOutput(std::move(image));
-			batches[i].setDataAvailable(true);
-
-			i++;
-			if (i == batchSize) {
-				i = 0;
-			}
-		}
+		threads.push_back(std::move(t));
 	}
 
 	timer.join();
-	imageProducer.join();
-	outputHandler.join();
+	for (auto&& t : threads) {
+		t.join();
+	}
+
+	// Write timing data
+	std::ofstream out(outputDir + "/timings.csv");
+	out << "write_time,processing_time,read_time,latency" << std::endl;
+	for (const auto& timing : timings) {
+		out << timing.writeDuration << ",";
+		out << timing.filteringDuration << ",";
+		out << timing.readDuration << ",";
+		out << timing.latency << ",";
+		out << std::endl;
+	}
+
+	for (auto&& image : outputImages) {
+		image.saveToDirectory(outputDir);
+	}
 
 	return 0;
 }
