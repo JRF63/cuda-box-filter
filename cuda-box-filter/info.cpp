@@ -2,11 +2,13 @@
 #include "errors.h"
 
 #include "cuda_runtime.h"
-#include "npp.h"
 
-#include <cstdio>
+constexpr size_t combineMajorMinor(int major, int minor) {
+	return static_cast<size_t>(major) << 32 | minor;
+}
 
-inline bool checkCudaCapabilities(int major_version, int minor_version) {
+// CUDA C Programming Guide Table 15. Technical Specifications per Compute Capability
+size_t maxConcurrentKernel() {
 	int dev;
 	int major = 0;
 	int minor = 0;
@@ -15,35 +17,42 @@ inline bool checkCudaCapabilities(int major_version, int minor_version) {
 	CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
 	CUDA_CHECK(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
 
-	if ((major > major_version) || (major == major_version && minor >= minor_version)) {
-		printf("  Device %d: %s, Compute SM %d.%d detected\n", dev, nppGetGpuName(), major, minor);
-		return true;
+	size_t computeCap = combineMajorMinor(major, minor);
+	size_t num;
+	switch (computeCap) {
+	case combineMajorMinor(5, 0):
+	case combineMajorMinor(5, 2):
+		num = 32;
+		break;
+	case combineMajorMinor(5, 3):
+		num = 16;
+		break;
+	case combineMajorMinor(6, 0):
+		num = 128;
+		break;
+	case combineMajorMinor(6, 1):
+		num = 32;
+		break;
+	case combineMajorMinor(6, 2):
+		num = 16;
+		break;
+	case combineMajorMinor(7, 0):
+		num = 128;
+		break;
+	case combineMajorMinor(7, 2):
+		num = 16;
+		break;
+	case combineMajorMinor(7, 5):
+	case combineMajorMinor(8, 0):
+	case combineMajorMinor(8, 6):
+	case combineMajorMinor(8, 7):
+	case combineMajorMinor(8, 9):
+	case combineMajorMinor(9, 0):
+		num = 128;
+		break;
+	default:
+		num = 128; // Future versions
+		break;
 	}
-	else {
-		printf(
-			"  No GPU device was found that can support "
-			"CUDA compute capability %d.%d.\n",
-			major_version,
-			minor_version
-		);
-		return false;
-	}
-}
-
-bool printNPPinfo() {
-	const NppLibraryVersion* libVer = nppGetLibVersion();
-
-	printf("NPP Library Version %d.%d.%d\n", libVer->major, libVer->minor, libVer->build);
-
-	int driverVersion;
-	int runtimeVersion;
-	cudaDriverGetVersion(&driverVersion);
-	cudaRuntimeGetVersion(&runtimeVersion);
-
-	printf("  CUDA Driver  Version: %d.%d\n", driverVersion / 1000, (driverVersion % 100) / 10);
-	printf("  CUDA Runtime Version: %d.%d\n", runtimeVersion / 1000, (runtimeVersion % 100) / 10);
-
-	// Min spec is SM 1.0 devices
-	bool bVal = checkCudaCapabilities(1, 0);
-	return bVal;
+	return num;
 }

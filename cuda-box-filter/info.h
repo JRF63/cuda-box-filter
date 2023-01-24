@@ -1,3 +1,3 @@
 #pragma once
 
-bool printNPPinfo();
+size_t maxConcurrentKernel();

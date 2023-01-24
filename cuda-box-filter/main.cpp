@@ -30,7 +30,10 @@ int main() {
 	constexpr size_t NUM_IMAGES_TO_OUTPUT = 10;
 
 	// Reserve a certain amount of GPU memory to avoid starving the OS
-	constexpr size_t GPU_MEM_RESERVED = 250000000;
+	constexpr size_t GPU_MEM_RESERVED = 500000000;
+
+	// Limit threads to max concurrent GPU kernel
+	size_t max_threads = maxConcurrentKernel();
 
 	Signal stopSignal;
 	Signal waitSignal;
@@ -54,6 +57,8 @@ int main() {
 	CUDA_CHECK(cudaMemGetInfo(&freeMem, &totalMem));
 	freeMem -= GPU_MEM_RESERVED;
 
+	std::atomic_size_t numReady = 0;
+
 	printf("Loading images to main memory");
 	for (auto entry : std::filesystem::directory_iterator{ imagesDir }) {
 		size_t memGpu;
@@ -67,11 +72,11 @@ int main() {
 		// There are 2 GPU buffers of the same size, one for the input and one for the output
 		size_t requiredMemGpu = 2 * memGpu;
 
-		if (requiredMemGpu <= freeMem) {
+		if ((threads.size() < max_threads) && requiredMemGpu <= freeMem) {
 			// Manually subtract from the free memory estimate instead of quering again via `cudaMemGetInfo`
 			freeMem -= requiredMemGpu;
 
-			std::thread t([memGpu, entry, NUM_IMAGES_TO_OUTPUT, &waitSignal, &timings, &timingsMutex, &outputImages, &outputImagesMutex]() {
+			std::thread t([memGpu, entry, NUM_IMAGES_TO_OUTPUT, &numReady, &waitSignal, &timings, &timingsMutex, &outputImages, &outputImagesMutex]() {
 				GpuBuffer gpuInput(memGpu);
 				GpuBuffer gpuOutput(memGpu);
 
@@ -80,8 +85,7 @@ int main() {
 
 				try {
 					ImageCpu image(entry);
-					printf(".");
-
+			
 					size_t memCpu = freeImageStepSize(image.width(), 3) * image.height();
 					StagingBuffer stagingBuffer(memCpu);
 
@@ -90,6 +94,10 @@ int main() {
 
 					CUDA_CHECK(stagingBuffer.copyFromCpu(image, nppStream.stream()));
 					nppStream.synchronize();
+
+					printf(".");
+					// Register to the main thread that this thread is ready
+					numReady.fetch_add(1, std::memory_order_acq_rel);
 
 					// Wait until all threads have loaded the image to the staging buffer
 					while (!waitSignal.shouldStop()) {
@@ -123,6 +131,7 @@ int main() {
 							outputImages.pop_front();
 						}
 					}
+					printf(".");
 				}
 				catch (IoError err) {}
 
@@ -130,13 +139,19 @@ int main() {
 			threads.push_back(std::move(t));
 		}
 		else {
+			while (numReady.load(std::memory_order_acquire) != threads.size()) {
+				std::this_thread::yield();
+			}
+			printf("\nProcessing images------------");
+
 			waitSignal.signalStop();
 			for (auto&& t : threads) {
 				t.join();
 			}
+
+			numReady.store(0, std::memory_order_release);
 			threads.clear();
 			waitSignal.reset();
-
 			cudaDeviceSynchronize();
 
 			// Exit the loop upon timeout
