@@ -1,7 +1,12 @@
 #include "image_cpu.h"
 
+#include "util.h"
+
 #include "FreeImage.h"
 
+#include <cstdlib>
+#include <fstream>
+#include <ios>
 #include <string>
 
 void FreeImageDestroyer::operator()(FIBITMAP* ptr) {
@@ -40,7 +45,7 @@ ImageCpu::ImageCpu(const std::filesystem::path& fileName) {
 	bitmap_ = std::unique_ptr<FIBITMAP, FreeImageDestroyer>(bitmap);
 }
 
-void ImageCpu::saveToDirectory(const std::filesystem::path& directory) {
+void ImageCpu::saveToDirectory(const std::filesystem::path& directory) const {
 	std::filesystem::path fileName = directory;
 	fileName /= fileName_;
 
@@ -54,20 +59,52 @@ void ImageCpu::saveToDirectory(const std::filesystem::path& directory) {
 	}
 }
 
-ImageCpu::ImageCpu(const std::filesystem::path& fileName, int width, int height, int bytesPerPixel) {
-	FIBITMAP* bitmap = FreeImage_Allocate(width, height, 8 * bytesPerPixel);
-	if (bitmap == nullptr) {
-		throw IoError::AllocationError;
-	}
-	data_ = FreeImage_GetBits(bitmap);
-	width_ = width;
-	height_ = height;
-	step_ = FreeImage_GetPitch(bitmap);
-	bytesPerPixel_ = bytesPerPixel;
-	fileName_ = std::move(fileName.filename().string());
-	bitmap_ = std::unique_ptr<FIBITMAP, FreeImageDestroyer>(bitmap);
-}
-
 cudaError_t ImageCpu::copyBackFromStagingBuffer(const StagingBuffer& other, cudaStream_t stream) {
 	return cudaMemcpyAsync(data(), other.data(), bytesData(), cudaMemcpyHostToHost);
+}
+
+// Manually implement check for width, height and BPP of a PNG image since FreeImage cannot do it.
+size_t decodedImageSize(const std::filesystem::path& fileName) {
+	constexpr size_t N = 26;
+	Npp8u buffer[N];
+	Npp8u pngHeader[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+
+	std::ifstream file(fileName, std::ios::binary);
+	try {
+		file.read(reinterpret_cast<char*>(buffer), N);
+		if (file.gcount() != N) {
+			throw IoError::UnknownFileFormat;
+		}
+	}
+	catch (std::ios_base::failure err) {
+		throw IoError::UnknownFileFormat;
+	}
+
+	// Check for the presence of a PNG header
+	if (memcmp(buffer, pngHeader, 8) != 0) {
+		throw IoError::UnknownFileFormat;
+	}
+
+	auto colorType = buffer[25];
+
+	// Only RGB and grayscale images are allowed
+	if (colorType != 0 && colorType != 2) {
+		throw IoError::UnhandledFormat;
+	}
+
+	auto bytesToInt = [](Npp8u* ptr) {
+		Npp32u res = ptr[0];
+		for (int i = 0; i <= 3; i++) {
+			res = (res << 8) | ptr[i];
+		}
+		return res;
+	};
+
+	Npp32u width = bytesToInt(&buffer[16]);
+	Npp32u height = bytesToInt(&buffer[20]);
+	Npp32u bitDepth = buffer[24];
+	Npp32u channels = colorType == 0 ? 1 : 3;
+	Npp32u bpp = bitDepth * channels;
+
+	return cudaStepSize(width, bpp / 8) * height;
 }

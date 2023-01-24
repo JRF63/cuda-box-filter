@@ -3,6 +3,8 @@
 #include "image_base.h"
 #include "image_cpu.h"
 
+#include "errors.h"
+
 #include "nppi.h"
 
 #include <memory>
@@ -21,7 +23,7 @@ public:
 		: ImageBase(), allocatedSize_(size)
 	{
 		void* ptr = nullptr;
-		cudaMallocHost(&ptr, size);
+		CUDA_CHECK(cudaMallocHost(&ptr, size));
 		data_ = std::unique_ptr<void, PinnedMemoryDestroyer>(ptr);
 	}
 
@@ -49,7 +51,7 @@ public:
 		: ImageBase(), allocatedSize_(size)
 	{
 		void* ptr = nullptr;
-		cudaMalloc(&ptr, size);
+		CUDA_CHECK(cudaMalloc(&ptr, size));
 		data_ = std::unique_ptr<void, DeviceMemoryDeleter>(ptr);
 	}
 

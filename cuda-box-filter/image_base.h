@@ -34,8 +34,13 @@ public:
 		return static_cast<size_t>(width()) * bytesPerPixel();
 	}
 
-	// Total number of bytes held including padding.
+	// Total number of bytes held excluding padding.
 	size_t bytesData() const {
+		return widthBytes() * height();
+	}
+
+	// Total number of bytes held including padding.
+	size_t bytesDataWithPadding() const {
 		return static_cast<size_t>(step()) * height();
 	}
 

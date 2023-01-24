@@ -28,8 +28,6 @@ class ImageCpu: public ImageBase {
 public:
 	ImageCpu(const std::filesystem::path& fileName);
 
-	ImageCpu(const std::filesystem::path& fileName, int width, int height, int bytesPerPixel);
-
 	void* data() const override {
 		return data_;
 	}
@@ -40,10 +38,13 @@ public:
 
 	cudaError_t copyBackFromStagingBuffer(const StagingBuffer& other, cudaStream_t stream);
 
-	void saveToDirectory(const std::filesystem::path& directory);
+	void saveToDirectory(const std::filesystem::path& directory) const;
 
 private:
 	std::unique_ptr<FIBITMAP, FreeImageDestroyer> bitmap_;
 	void* data_;
 	std::string fileName_;
 };
+
+// Calculates the amount of GPU memory consumed by the image when decoded.
+size_t decodedImageSize(const std::filesystem::path& fileName);

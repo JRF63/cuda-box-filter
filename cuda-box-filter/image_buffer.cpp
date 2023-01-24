@@ -4,21 +4,22 @@
 void PinnedMemoryDestroyer::operator()(void* ptr) { cudaFreeHost(ptr); }
 
 cudaError_t StagingBuffer::copyFromCpu(const ImageCpu& other, cudaStream_t stream) {
-	if (allocatedSize_ < other.bytesData()) {
-		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image");
+	// Include the padding because this memcpy's the whole buffer
+	if (allocatedSize_ < other.bytesDataWithPadding()) {
+		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image\n");
 		exit(1);
 	}
 	width_ = other.width();
 	height_ = other.height();
 	step_ = other.step();
 	bytesPerPixel_ = other.bytesPerPixel();
-	return cudaMemcpyAsync(data(), other.data(), other.bytesData(), cudaMemcpyHostToHost);
+	return cudaMemcpyAsync(data(), other.data(), other.bytesDataWithPadding(), cudaMemcpyHostToHost);
 }
 
 cudaError_t StagingBuffer::copyBackFromGpuAsync(const GpuBuffer& other, cudaStream_t stream) {
 	if (allocatedSize_ < other.bytesData()) {
-		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image");
-		exit(1);
+		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image\n");
+		exit(2);
 	}
 	return cudaMemcpy2DAsync(
 		data(),
@@ -40,8 +41,8 @@ cudaError_t GpuBuffer::copyFromStagingBufferAsync(const StagingBuffer& other, cu
 	step_ = cudaStepSize(other.width(), other.bytesPerPixel());
 	bytesPerPixel_ = other.bytesPerPixel();
 	if (allocatedSize_ < bytesData()) {
-		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image");
-		exit(2);
+		fprintf(stderr, "Unrecoverable error: allocated buffer is too small for input image\n");
+		exit(3);
 	}
 	return cudaMemcpy2DAsync(
 		data(),
